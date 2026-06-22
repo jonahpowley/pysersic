@@ -477,11 +477,11 @@ class FitSingle(BaseFitter):
             params = self.prior()
 
             # Add penalty term (-inf) to likelihood for multi-component fits where effective radius of the bulge is larger than the disc
-            if self.prior.profile_type in ["doublesersic", "sersic_exp"]:
-                numpyro.factor(
-                    "r_eff_order",
-                    jnp.where(params["r_eff_1"] <= params["r_eff_2"], 0.0, -jnp.inf),
-                )
+            # if self.prior.profile_type in ["doublesersic", "sersic_exp"]:
+            #     numpyro.factor(
+            #         "r_eff_order",
+            #         jnp.where(params["r_eff_1"] <= params["r_eff_2"], 0.0, -jnp.inf),
+            #     )
 
             out = self.renderer.render_source(
                 params, self.prior.profile_type, suffix=self.prior.suffix
