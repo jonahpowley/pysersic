@@ -147,21 +147,23 @@ class BaseMultiBandFitter(BaseFitter):
         # Use estimated posterior of each individual band to set priors on unlinked parameters
         # Since these are "nuisance" in some sense that should help convergence etc. when sampling
         if rescale_unlinked_priors:
-            for fitter in self.fitter_list:
+            rescale_key = jax.random.key(self.n_bands)
+            for band_index, fitter in enumerate(self.fitter_list):
                 if hasattr(fitter, 'svi_results'):
+                    svi_res = fitter.svi_results
+                else:
+                    band_key = jax.random.fold_in(rescale_key, band_index)
+                    svi_res = fitter.estimate_posterior(rkey=band_key)
 
-                        svi_summ_no_suffix = az.summary(fitter.svi_results.idata, round_to=5).T.to_dict()
-                        svi_summ = {}
-                        for key in svi_summ_no_suffix:
-                            svi_summ[f'{key}{fitter.prior.suffix}'] = svi_summ_no_suffix[key]
-                else:    
-                    svi_res = fitter.estimate_posterior()
-                    svi_summ = az.summary(svi_res.idata, round_to=5)
+                summary = az.summary(svi_res.idata, round_to=5)
+                result_suffix = svi_res.prior.suffix
+                svi_summ = {
+                    name.removesuffix(result_suffix) + fitter.prior.suffix: values
+                    for name, values in summary.to_dict(orient='index').items()
+                }
 
-    
-                    
                 for key, summ_param in svi_summ.items():
-                    param = key.replace(fitter.prior.suffix, '')
+                    param = key.removesuffix(fitter.prior.suffix)
                     if param in self.unlinked_params:
                         prior_dist = fitter.prior.dist_dict[key]
 
@@ -192,7 +194,7 @@ class BaseMultiBandFitter(BaseFitter):
                 if fitter.prior.sky_type != 'none':
                     sky_params = [param for param in svi_summ.keys() if 'sky' in param]
                     for param in sky_params:
-                        param_no_suffix = param.replace(fitter.prior.suffix, '')
+                        param_no_suffix = param.removesuffix(fitter.prior.suffix)
                         fitter.prior.sky_prior.update_prior(param_no_suffix, svi_summ[param]['mean'], svi_summ[param]['sd']*2.)
         
         ##Throw all the data into a dictionary so it gets past onto results class if needed
@@ -321,25 +323,22 @@ class FitMultiBandPoly(BaseMultiBandFitter):
     def sample_param_at_bands(self, name):
         prior_sigma = 1.
 
-        poly_coeff = sample(f'{name}_poly_coeff',dist.Normal(scale=prior_sigma), sample_shape=(self.poly_order,))
+        poly_coeff = sample(f'{name}_poly_coeff', dist.Normal(scale=prior_sigma), sample_shape=(self.poly_order,))
         value_at_bands_normed = jnp.polyval(poly_coeff, self.wv_normed)
-        value_to_save_normed = jnp.polyval(poly_coeff, self.wv_to_save_normed)
+        if self.wv_to_save is not None:
+            value_to_save_normed = jnp.polyval(poly_coeff, self.wv_to_save_normed)
 
         if name in self.linked_params_range:
-            low,hi = self.linked_params_range[name]
-            
-            # Use Tanh to make sure parameters are constrained
-            value_at_bands = self.restrict_func(value_at_bands_normed,hi,low)
-            
-            deterministic(f'{name}_at_wv', 
-                            self.restrict_func(value_to_save_normed,hi,low)
-            )
+            low, hi = self.linked_params_range[name]
+            value_at_bands = self.restrict_func(value_at_bands_normed, hi, low)
+            if self.wv_to_save is not None:
+                deterministic(f'{name}_at_wv', self.restrict_func(value_to_save_normed, hi, low))
         else:
-            value_at_bands = value_at_bands_normed*self.linked_params_scale[name] + self.linked_params_mean[name]
-
-            deterministic(f'{name}_at_wv', 
-                            value_to_save_normed*self.linked_params_scale[name] + self.linked_params_mean[name]
-            )
+            scale = self.linked_params_scale[name]
+            mean = self.linked_params_mean[name]
+            value_at_bands = value_at_bands_normed * scale + mean
+            if self.wv_to_save is not None:
+                deterministic(f'{name}_at_wv', value_to_save_normed * scale + mean)
 
         return value_at_bands
 
@@ -401,8 +400,9 @@ class FitMultiBandBSpline(BaseMultiBandFitter):
         bspl_class = make_interp_spline(x = np.linspace(min_lambda-lambda_pad, max_lambda + lambda_pad, num = self.N_knots, endpoint=True),
                                                 y = np.ones(self.N_knots), k = spline_k)
         self.dmat_bands = jnp.array( bspl_class.design_matrix(self.wavelengths, bspl_class.t,k = spline_k).toarray() )
-        wv_to_save_dmat = jnp.clip(self.wv_to_save, min_lambda, max_lambda)
-        self.dmat_save = jnp.array( bspl_class.design_matrix(wv_to_save_dmat, bspl_class.t,k = spline_k).toarray() )
+        if self.wv_to_save is not None:
+            wv_to_save_dmat = jnp.clip(self.wv_to_save, min_lambda, max_lambda)
+            self.dmat_save = jnp.array(bspl_class.design_matrix(wv_to_save_dmat, bspl_class.t, k=spline_k).toarray())
     
     def sample_param_at_bands(self, name):
         prior_sigma = 1.5
@@ -427,9 +427,8 @@ class FitMultiBandBSpline(BaseMultiBandFitter):
         
         value_at_bands = jnp.dot(self.dmat_bands,weights_cur)
         
-        deterministic(f'{name}_at_wv', 
-                        jnp.dot(self.dmat_save,weights_cur)
-        )
+        if self.wv_to_save is not None:
+            deterministic(f'{name}_at_wv', jnp.dot(self.dmat_save, weights_cur))
 
         return value_at_bands
 
