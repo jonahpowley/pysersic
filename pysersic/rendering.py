@@ -61,6 +61,12 @@ base_profile_params = dict(
 )
 
 
+base_profile_types.append("scaled_sersic_exp")
+base_profile_params["scaled_sersic_exp"] = [
+    "xc", "yc", "flux", "f_1", "r_eff_2", "u_1", "n", "ellip_1", "ellip_2", "theta"
+]
+
+
 class BaseRenderer(eqx.Module):
     im_shape: tuple = eqx.field(static=True)
     psf_shape: tuple = eqx.field(static=True)
@@ -222,6 +228,9 @@ class BaseRenderer(eqx.Module):
         F2, im_int_2, im_obs_2 = self.render_exp(dict_2)
 
         return F1 + F2, im_int_1 + im_int_2, im_obs_1 + im_obs_2
+
+    def render_scaled_sersic_exp(self, params: dict):
+        return self.render_sersic_exp(params)
 
     def render_sersic_pointsource(self, params: dict):
         pointsource_dict = {}

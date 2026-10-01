@@ -13,7 +13,7 @@ import numpy as np
 import pandas
 from astropy.stats import biweight_scale as bws
 from numpyro import distributions as dist
-from numpyro import infer, sample
+from numpyro import deterministic, infer, sample
 from photutils.morphology import data_properties
 
 base_sky_types = ["none", "flat", "tilted-plane"]
@@ -85,6 +85,12 @@ base_profile_params = dict(
         ],
     )
 )
+
+
+base_profile_types.append("scaled_sersic_exp")
+base_profile_params["scaled_sersic_exp"] = [
+    "xc", "yc", "flux", "f_1", "r_eff_2", "u_1", "n", "ellip_1", "ellip_2", "theta"
+]
 
 
 class BaseSkyPrior(eqx.Module):
@@ -584,6 +590,65 @@ class PySersicSourcePrior(BasePrior):
         return out
 
 
+def get_scaled_prior_bounds(distribution):
+    """Recover scalar physical support bounds for the scaled profile."""
+    if distribution.batch_shape or distribution.event_shape or distribution.is_discrete:
+        raise ValueError("Expected a scalar continuous prior")
+    if isinstance(distribution, dist.TransformedDistribution):
+        low, high = get_scaled_prior_bounds(distribution.base_dist)
+        for transform in distribution.transforms:
+            try:
+                sign = transform.sign
+            except NotImplementedError as error:
+                raise ValueError("Unsupported nonmonotonic transform") from error
+            if isinstance(transform, dist.transforms.SigmoidTransform):
+                first, last = jax.nn.sigmoid(low), jax.nn.sigmoid(high)
+            else:
+                first, last = transform(low), transform(high)
+            low, high = jnp.where(sign > 0, first, last), jnp.where(sign > 0, last, first)
+        return low, high
+    support = distribution.support
+    if support != dist.constraints.real and not hasattr(support, 'lower_bound') and not hasattr(support, 'upper_bound'):
+        raise ValueError("Unsupported support")
+    return getattr(support, 'lower_bound', -jnp.inf), getattr(support, 'upper_bound', jnp.inf)
+
+
+class ScaledSersicExpPrior(PySersicSourcePrior):
+    """Sample the bulge's fractional position within its permitted radius interval."""
+
+    def __init__(self, sky_type="none", sky_guess=None, sky_guess_err=None, suffix=""):
+        super().__init__("scaled_sersic_exp", sky_type, sky_guess, sky_guess_err, suffix)
+
+    def _set_dist(self, name, prior):
+        if name in ('r_eff_1' + self.suffix, 's_1' + self.suffix):
+            raise ValueError("Only r_eff_2 and u_1 have independent radius priors")
+        if name in ('r_eff_2' + self.suffix, 'u_1' + self.suffix):
+            low, high = get_scaled_prior_bounds(prior)
+            if name.startswith('r_eff_2') and (not np.isfinite(low) or low <= 0 or not high > low):
+                raise ValueError("r_eff_2 needs a finite positive lower support and nonzero width")
+            if name.startswith('u_1') and not 0 <= low < high <= 1:
+                raise ValueError("u_1 support must lie inside [0, 1]")
+        super()._set_dist(name, prior)
+
+    def check_vars(self, verbose=False):
+        expected = {name + self.suffix for name in base_profile_params[self.profile_type]}
+        return set(self.dist_dict) == expected
+
+    def derive_radius(self, params, param_suffix=None):
+        """Add the physical bulge radius, using the current disc prior's support."""
+        param_suffix = self.suffix if param_suffix is None else param_suffix
+        r_min, _ = get_scaled_prior_bounds(self.dist_dict['r_eff_2' + self.suffix])
+        disc = params['r_eff_2' + param_suffix]
+        fraction = params['u_1' + param_suffix]
+        params['r_eff_1' + param_suffix] = deterministic('r_eff_1' + self.suffix, r_min + fraction * (disc - r_min))
+        return params
+
+    def __call__(self):
+        if not self.check_vars():
+            raise ValueError("Incomplete scaled_sersic_exp prior")
+        return self.derive_radius(super().__call__())
+
+
 class PySersicMultiPrior(BasePrior):
     """
     Class used for priors for multi source fitting in PySersic
@@ -620,6 +685,8 @@ class PySersicMultiPrior(BasePrior):
         suffix : Optional[str], optional
             Additional suffix to add to each variable name, by default ""
         """
+        if any(profile == 'scaled_sersic_exp' for profile in catalog['type']):
+            raise ValueError("scaled_sersic_exp multisource is not supported")
         properties = SourceProperties(-99)
 
         if sky_type != "none":
@@ -698,19 +765,14 @@ def update_prior_suffix(prior: BasePrior, new_suffix: str) -> BasePrior:
     old_suffix = copy(prior.suffix)
 
     def name_change(s: str) -> str:
-        new_s = copy(s)
-        if len(old_suffix) == 0:
-            new_s += new_suffix
-        else:
-            new_s = new_s.replace(old_suffix, new_suffix)
-        return new_s
+        return s.removesuffix(old_suffix) + new_suffix
 
     new_dist_dict = {}
     for k, v in prior.dist_dict.items():
         new_dist_dict[name_change(k)] = prior.dist_dict[k]
 
     new_reparam_dict = {}
-    for k, v in prior.dist_dict.items():
+    for k, v in prior.reparam_dict.items():
         new_reparam_dict[name_change(k)] = prior.reparam_dict[k]
 
     new_prior = eqx.tree_at(lambda t: t.reparam_dict, prior, new_reparam_dict)
@@ -722,7 +784,7 @@ def update_prior_suffix(prior: BasePrior, new_suffix: str) -> BasePrior:
         new_dist_dict[name_change(k)] = prior.sky_prior.dist_dict[k]
 
     new_reparam_dict = {}
-    for k, v in prior.sky_prior.dist_dict.items():
+    for k, v in prior.sky_prior.reparam_dict.items():
         new_reparam_dict[name_change(k)] = prior.sky_prior.reparam_dict[k]
 
     new_prior = eqx.tree_at(
@@ -971,8 +1033,10 @@ class SourceProperties:
             Pysersic prior object to be used to initialize FitSingle
         """
 
-        prior = PySersicSourcePrior(
-            profile_type=profile_type,
+        prior_class = ScaledSersicExpPrior if profile_type == 'scaled_sersic_exp' else PySersicSourcePrior
+        profile_kwargs = {} if profile_type == 'scaled_sersic_exp' else {'profile_type': profile_type}
+        prior = prior_class(
+            **profile_kwargs,
             sky_type=sky_type,
             suffix=suffix,
             sky_guess=self.sky_guess,
@@ -1001,7 +1065,7 @@ class SourceProperties:
             if profile_type == "spergel":
                 prior.set_uniform_prior('nu_star',0.2,10.)
 
-        elif profile_type in ["doublesersic", "sersic_exp"]:
+        elif profile_type in ["doublesersic", "sersic_exp", "scaled_sersic_exp"]:
             prior.set_uniform_prior("f_1", 0.0, 1.0)
 
             # prior.set_custom_prior('theta',
@@ -1011,9 +1075,12 @@ class SourceProperties:
 
             r_loc1 = self.r_eff_guess / 1.5
             r_eff_guess_err1 = jnp.sqrt(self.r_eff_guess / 1.5)
-            prior.set_truncated_gaussian_prior(
-                "r_eff_1", r_loc1, r_eff_guess_err1, low=0.5
-            )
+            if profile_type == 'scaled_sersic_exp':
+                prior.set_uniform_prior('u_1', 0., 1.)
+            else:
+                prior.set_truncated_gaussian_prior(
+                    "r_eff_1", r_loc1, r_eff_guess_err1, low=0.5
+                )
 
             r_loc2 = self.r_eff_guess * 1.5
             r_eff_guess_err2 = jnp.sqrt(self.r_eff_guess * 1.5)

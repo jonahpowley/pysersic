@@ -1,6 +1,6 @@
 
 from .pysersic import BaseFitter, FitMulti,FitSingle
-from .priors import update_prior_suffix
+from .priors import ScaledSersicExpPrior, get_scaled_prior_bounds, update_prior_suffix
 import abc
 import numpy as np
 import jax.numpy as jnp
@@ -99,8 +99,9 @@ class BaseMultiBandFitter(BaseFitter):
         self.reparam_dict = {}
         for band_name, band_fitter in zip(self.band_names, self.fitter_list):
             for param_name in self.unlinked_params:
-                val = band_fitter.prior.reparam_dict[f'{param_name}_{band_name}']
-                self.reparam_dict.update( {f'{param_name}_{band_name}':val} )
+                name = f'{param_name}_{band_name}'
+                if name in band_fitter.prior.reparam_dict:
+                    self.reparam_dict[name] = band_fitter.prior.reparam_dict[name]
 
         #Find mean and scale of prior samples of all bands to re-scale
         self.linked_params_mean = {}
@@ -118,6 +119,8 @@ class BaseMultiBandFitter(BaseFitter):
                 self.linked_params_scale[param] = params_prior_samples.std()
 
 
+        self.scaled_sersic_exp = isinstance(self.fitter_list[0].prior, ScaledSersicExpPrior)
+
         #Set defaults for all parameters that have known limits
         self.linked_params_range = {}
         for param in self.linked_params:
@@ -130,7 +133,25 @@ class BaseMultiBandFitter(BaseFitter):
             if param[:3] == 'f_1': #Slightly different condition or else would clash with 'r_eff_1'
                 self.linked_params_range[param] = [0.,1.]
 
+        if self.scaled_sersic_exp and 'u_1' in self.linked_params:
+            self.linked_params_range['u_1'] = [0., 1.]
         self.linked_params_range.update(linked_params_range) #User-specific updates
+
+        if self.scaled_sersic_exp:
+            if set(self.linked_params) & set(self.const_params):
+                raise ValueError("Parameters cannot be linked and constant")
+            bounds = [get_scaled_prior_bounds(fitter.prior.dist_dict['r_eff_2' + fitter.prior.suffix]) for fitter in self.fitter_list]
+            lower, upper = max(float(x[0]) for x in bounds), min(float(x[1]) for x in bounds)
+            if 'r_eff_2' in self.linked_params:
+                low, high = self.linked_params_range.setdefault('r_eff_2', [lower, upper])
+                if not np.isfinite([low, high]).all() or not lower <= low < high <= upper:
+                    raise ValueError("Linked r_eff_2 needs a finite range inside every band's support")
+            if 'r_eff_2' in self.const_params and (float(bounds[0][0]) < lower or float(bounds[0][1]) > upper):
+                raise ValueError("Constant disc prior is incompatible with another band's support")
+            if 'u_1' in self.linked_params:
+                low, high = self.linked_params_range['u_1']
+                if not 0 <= low < high <= 1:
+                    raise ValueError("Linked u_1 range must lie inside [0, 1]")
 
 
         #For constant parameters use the prior in the of the first band
@@ -164,8 +185,16 @@ class BaseMultiBandFitter(BaseFitter):
 
                 for key, summ_param in svi_summ.items():
                     param = key.removesuffix(fitter.prior.suffix)
+                    if self.scaled_sersic_exp and param == 'u_1':
+                        continue
                     if param in self.unlinked_params:
                         prior_dist = fitter.prior.dist_dict[key]
+                        if self.scaled_sersic_exp:
+                            low, high = get_scaled_prior_bounds(prior_dist)
+                            fitter.prior.set_truncated_gaussian_prior(
+                                param, summ_param['mean'], summ_param['sd'] * 2.,
+                                low=None if np.isneginf(low) else low, high=None if np.isposinf(high) else high)
+                            continue
 
                         #Check if prior dist is transformed, most likely yes
                         is_t = isinstance(prior_dist, dist.TransformedDistribution)
@@ -258,6 +287,12 @@ class BaseMultiBandFitter(BaseFitter):
                 for param_name in self.unlinked_params:
                     params_dict[band_name][param_name] = sample(f'{param_name}_{band_name}', band_fitter.prior.dist_dict[f'{param_name}_{band_name}'])
                 
+                if self.scaled_sersic_exp:
+                    params_dict[band_name] = band_fitter.prior.derive_radius(params_dict[band_name], param_suffix="")
+                    for param in ('u_1', 'r_eff_2'):
+                        if param in self.const_params:
+                            deterministic(f'{param}_{band_name}', params_dict[band_name][param])
+
                 #Render each band like normal
                 if self.fitter_type == 'single':
                     out = band_fitter.renderer.render_source(params_dict[band_name],
