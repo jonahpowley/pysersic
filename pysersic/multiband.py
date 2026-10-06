@@ -288,7 +288,7 @@ class BaseMultiBandFitter(BaseFitter):
                     params_dict[band_name][param_name] = sample(f'{param_name}_{band_name}', band_fitter.prior.dist_dict[f'{param_name}_{band_name}'])
                 
                 if self.scaled_sersic_exp:
-                    params_dict[band_name] = band_fitter.prior.derive_radius(params_dict[band_name], param_suffix="")
+                    params_dict[band_name] = band_fitter.prior.derive_bulge_radius(params_dict[band_name], param_suffix="")
                     for param in ('u_1', 'r_eff_2'):
                         if param in self.const_params:
                             deterministic(f'{param}_{band_name}', params_dict[band_name][param])
