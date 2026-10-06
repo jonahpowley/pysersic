@@ -60,7 +60,7 @@ def gaussian_loss_w_frac(mod: jnp.array,
                 rms: jnp.array,
                 mask: jnp.array,
                 suffix: str = "")-> float:
-    """Gaussian loss with and additional fractional increase to all uncertainties such that,
+    r"""Gaussian loss with and additional fractional increase to all uncertainties such that,
 
     $$ \sigma_{new,i} = (1 + f) * \sigma_{old,i} $$
 
@@ -91,7 +91,7 @@ def gaussian_loss_w_sys(mod: jnp.array,
                 rms: jnp.array,
                 mask: jnp.array,
                 suffix: str = "")-> float:
-    """Gaussian loss with and additional systematic increase such_that
+    r"""Gaussian loss with and additional systematic increase such_that
 
     $$ \sigma_{new,i}^2 = \sigma_{old,i}^2 + \sigma_{sys}^2 $$
 
@@ -152,7 +152,7 @@ def student_t_loss_free_sys(mod: jnp.array,
                 mask: jnp.array,
                 nu: Optional[int] = 5,
                 suffix: str = "")-> float:
-    """
+    r"""
     Student T loss, which has fatter tails than Gaussian loss (or chi squared) so is so is more resilient to outliers. In addition, add additional systematic increase such that
 
     $$ \sigma_{new,i}^2 = \sigma_{old,i}^2 + \sigma_{sys}^2 $$
@@ -188,7 +188,7 @@ def pseudo_huber_loss(mod: jnp.array,
                 mask: jnp.array,
                 delta: Optional[int] = 3,
                 suffix: str = "")-> float:
-    """
+    r"""
     Pseudo huber loss function of the form:
 
     $$ L = \delta^2 * ( \sqrt{1 + (a/\delta)^2} - 1) $$
