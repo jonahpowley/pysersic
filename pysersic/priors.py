@@ -616,8 +616,32 @@ def get_scaled_prior_bounds(distribution):
 class ScaledSersicExpPrior(PySersicSourcePrior):
     """Sample the bulge's fractional position within its permitted radius interval."""
 
-    def __init__(self, sky_type="none", sky_guess=None, sky_guess_err=None, suffix=""):
+    minimum_bulge_radius: Optional[float] = None
+
+    def __init__(self, sky_type="none", sky_guess=None, sky_guess_err=None, suffix="", minimum_bulge_radius=None):
         super().__init__("scaled_sersic_exp", sky_type, sky_guess, sky_guess_err, suffix)
+        if minimum_bulge_radius is not None:
+            if not np.isfinite(minimum_bulge_radius) or minimum_bulge_radius <= 0:
+                raise ValueError('minimum_bulge_radius must be finite and positive')
+            self.minimum_bulge_radius = float(minimum_bulge_radius)
+
+    def with_minimum_bulge_radius(self, floor):
+        """Return a prior with a new pixel floor for the bulge radius; None restores the disc-prior floor."""
+        if floor is not None:
+            if not np.isfinite(floor) or floor <= 0:
+                raise ValueError('bulge_radius_floor must be finite and positive')
+            disc_prior = self.dist_dict.get('r_eff_2' + self.suffix)
+            if disc_prior is not None and floor > float(get_scaled_prior_bounds(disc_prior)[0]):
+                raise ValueError('bulge_radius_floor cannot exceed the disc prior lower support')
+        floor = None if floor is None else float(floor)
+        return eqx.tree_at(lambda prior: prior.minimum_bulge_radius, self, floor, is_leaf=lambda value: value is None)
+
+    @property
+    def bulge_radius_floor(self):
+        """Return the effective bulge floor in pixels."""
+        if self.minimum_bulge_radius is not None:
+            return self.minimum_bulge_radius
+        return get_scaled_prior_bounds(self.dist_dict['r_eff_2' + self.suffix])[0]
 
     def _set_dist(self, name, prior):
         if name in ('r_eff_1' + self.suffix, 's_1' + self.suffix):
@@ -626,6 +650,8 @@ class ScaledSersicExpPrior(PySersicSourcePrior):
             low, high = get_scaled_prior_bounds(prior)
             if name.startswith('r_eff_2') and (not np.isfinite(low) or low <= 0 or not high > low):
                 raise ValueError("r_eff_2 needs a finite positive lower support and nonzero width")
+            if name.startswith('r_eff_2') and self.minimum_bulge_radius is not None and low < self.minimum_bulge_radius:
+                raise ValueError('Disc prior lower support cannot be below minimum_bulge_radius')
             if name.startswith('u_1') and not 0 <= low < high <= 1:
                 raise ValueError("u_1 support must lie inside [0, 1]")
         super()._set_dist(name, prior)
@@ -634,10 +660,10 @@ class ScaledSersicExpPrior(PySersicSourcePrior):
         expected = {name + self.suffix for name in base_profile_params[self.profile_type]}
         return set(self.dist_dict) == expected
 
-    def derive_radius(self, params, param_suffix=None):
-        """Add the physical bulge radius, using the current disc prior's support."""
+    def derive_bulge_radius(self, params, param_suffix=None):
+        """Add the physical bulge radius above the effective bulge floor."""
         param_suffix = self.suffix if param_suffix is None else param_suffix
-        r_min, _ = get_scaled_prior_bounds(self.dist_dict['r_eff_2' + self.suffix])
+        r_min = self.bulge_radius_floor
         disc = params['r_eff_2' + param_suffix]
         fraction = params['u_1' + param_suffix]
         params['r_eff_1' + param_suffix] = deterministic('r_eff_1' + self.suffix, r_min + fraction * (disc - r_min))
@@ -646,7 +672,7 @@ class ScaledSersicExpPrior(PySersicSourcePrior):
     def __call__(self):
         if not self.check_vars():
             raise ValueError("Incomplete scaled_sersic_exp prior")
-        return self.derive_radius(super().__call__())
+        return self.derive_bulge_radius(super().__call__())
 
 
 class PySersicMultiPrior(BasePrior):
