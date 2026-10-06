@@ -974,7 +974,7 @@ class SourceProperties:
             returns self
         """
         if r_eff_guess is None:
-            r_eff_guess = self.cat.flux_radius(0.5).to(u.pixel).value
+            r_eff_guess = self.cat.fluxfrac_radius(0.5).to(u.pixel).value
 
         if r_eff_guess_err is not None:
             self.r_eff_guess_err = r_eff_guess_err
