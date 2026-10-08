@@ -154,6 +154,20 @@ class BaseMultiBandFitter(BaseFitter):
                     raise ValueError("Linked u_1 range must lie inside [0, 1]")
 
 
+            for param in ('v_1', 'ellip_2'):
+                bounds = [get_scaled_prior_bounds(fitter.prior.dist_dict[param + fitter.prior.suffix]) for fitter in self.fitter_list]
+                lower, upper = max(float(x[0]) for x in bounds), min(float(x[1]) for x in bounds)
+                if param in self.linked_params:
+                    low, high = linked_params_range.get(param, [lower, upper])
+                    # Compare decimal bounds at the precision used by the prior.
+                    low, high = np.asarray([low, high], dtype=jnp.result_type(bounds[0][0], bounds[0][1], 0.))
+                    if not lower <= low < high <= upper:
+                        raise ValueError(f"Linked {param} range must lie inside every band's support")
+                    self.linked_params_range[param] = [low, high]
+                if param in self.const_params and (float(bounds[0][0]) < lower or float(bounds[0][1]) > upper):
+                    raise ValueError(f"Constant {param} prior is incompatible with another band's support")
+
+
         #For constant parameters use the prior in the of the first band
         self.const_prior_dict = {}
         for const_param in self.const_params:
@@ -185,7 +199,7 @@ class BaseMultiBandFitter(BaseFitter):
 
                 for key, summ_param in svi_summ.items():
                     param = key.removesuffix(fitter.prior.suffix)
-                    if self.scaled_sersic_exp and param == 'u_1':
+                    if self.scaled_sersic_exp and param in ('u_1', 'v_1'):
                         continue
                     if param in self.unlinked_params:
                         prior_dist = fitter.prior.dist_dict[key]
@@ -289,7 +303,8 @@ class BaseMultiBandFitter(BaseFitter):
                 
                 if self.scaled_sersic_exp:
                     params_dict[band_name] = band_fitter.prior.derive_bulge_radius(params_dict[band_name], param_suffix="")
-                    for param in ('u_1', 'r_eff_2'):
+                    params_dict[band_name] = band_fitter.prior.get_bulge_ellipticity(params_dict[band_name], param_suffix="")
+                    for param in ('u_1', 'r_eff_2', 'v_1', 'ellip_2'):
                         if param in self.const_params:
                             deterministic(f'{param}_{band_name}', params_dict[band_name][param])
 

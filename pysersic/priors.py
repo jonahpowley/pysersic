@@ -89,7 +89,7 @@ base_profile_params = dict(
 
 base_profile_types.append("scaled_sersic_exp")
 base_profile_params["scaled_sersic_exp"] = [
-    "xc", "yc", "flux", "f_1", "r_eff_2", "u_1", "n", "ellip_1", "ellip_2", "theta"
+    "xc", "yc", "flux", "f_1", "r_eff_2", "u_1", "n", "v_1", "ellip_2", "theta"
 ]
 
 
@@ -614,12 +614,13 @@ def get_scaled_prior_bounds(distribution):
 
 
 class ScaledSersicExpPrior(PySersicSourcePrior):
-    """Sample the bulge's fractional position within its permitted radius interval."""
+    """Sample fractional bulge radius and ellipticity within the disc constraints."""
 
     minimum_bulge_radius: Optional[float] = None
 
     def __init__(self, sky_type="none", sky_guess=None, sky_guess_err=None, suffix="", minimum_bulge_radius=None):
         super().__init__("scaled_sersic_exp", sky_type, sky_guess, sky_guess_err, suffix)
+        self.minimum_bulge_radius = None
         if minimum_bulge_radius is not None:
             if not np.isfinite(minimum_bulge_radius) or minimum_bulge_radius <= 0:
                 raise ValueError('minimum_bulge_radius must be finite and positive')
@@ -643,7 +644,19 @@ class ScaledSersicExpPrior(PySersicSourcePrior):
             return self.minimum_bulge_radius
         return get_scaled_prior_bounds(self.dist_dict['r_eff_2' + self.suffix])[0]
 
+    @property
+    def minimum_bulge_ellipticity(self):
+        """Return the lower physical support of the disc ellipticity prior."""
+        return get_scaled_prior_bounds(self.dist_dict['ellip_2' + self.suffix])[0]
+
     def _set_dist(self, name, prior):
+        if name == 'ellip_1' + self.suffix:
+            raise ValueError("Configure v_1 instead of the derived ellip_1")
+        if name in ('v_1' + self.suffix, 'ellip_2' + self.suffix):
+            low, high = get_scaled_prior_bounds(prior)
+            valid = 0 <= low < high <= 1 if name.startswith('v_1') else 0 <= low < high < 1
+            if not valid:
+                raise ValueError("v_1 support must lie inside [0, 1]; ellip_2 needs support inside [0, 1)")
         if name in ('r_eff_1' + self.suffix, 's_1' + self.suffix):
             raise ValueError("Only r_eff_2 and u_1 have independent radius priors")
         if name in ('r_eff_2' + self.suffix, 'u_1' + self.suffix):
@@ -669,10 +682,32 @@ class ScaledSersicExpPrior(PySersicSourcePrior):
         params['r_eff_1' + param_suffix] = deterministic('r_eff_1' + self.suffix, r_min + fraction * (disc - r_min))
         return params
 
+    def get_bulge_ellipticity(self, params, param_suffix=None):
+        """Derive the physical bulge ellipticity from its fractional parameter.
+
+        Parameters
+        ----------
+        params : dict
+            Sampled independent parameters.
+        param_suffix : str or None
+            Suffix used in parameter keys; defaults to the prior suffix.
+
+        Returns
+        -------
+        dict
+            Parameters including deterministic ellip_1.
+        """
+        param_suffix = self.suffix if param_suffix is None else param_suffix
+        floor = self.minimum_bulge_ellipticity
+        disc = params['ellip_2' + param_suffix]
+        fraction = params['v_1' + param_suffix]
+        params['ellip_1' + param_suffix] = deterministic('ellip_1' + self.suffix, floor + fraction * (disc - floor))
+        return params
+
     def __call__(self):
         if not self.check_vars():
             raise ValueError("Incomplete scaled_sersic_exp prior")
-        return self.derive_bulge_radius(super().__call__())
+        return self.get_bulge_ellipticity(self.derive_bulge_radius(super().__call__()))
 
 
 class PySersicMultiPrior(BasePrior):
@@ -1114,7 +1149,10 @@ class SourceProperties:
                 "r_eff_2", r_loc2, r_eff_guess_err2, low=0.5
             )
 
-            prior.set_uniform_prior("ellip_1", 0, 0.9)
+            if profile_type == 'scaled_sersic_exp':
+                prior.set_uniform_prior("v_1", 0, 1)
+            else:
+                prior.set_uniform_prior("ellip_1", 0, 0.9)
             prior.set_uniform_prior("ellip_2", 0, 0.9)
             if profile_type == "doublesersic":
                 prior.set_truncated_gaussian_prior("n_1", 4, 1, low=0.65, high=6)

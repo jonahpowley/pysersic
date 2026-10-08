@@ -63,7 +63,7 @@ base_profile_params = dict(
 
 base_profile_types.append("scaled_sersic_exp")
 base_profile_params["scaled_sersic_exp"] = [
-    "xc", "yc", "flux", "f_1", "r_eff_2", "u_1", "n", "ellip_1", "ellip_2", "theta"
+    "xc", "yc", "flux", "f_1", "r_eff_2", "u_1", "n", "v_1", "ellip_2", "theta"
 ]
 
 

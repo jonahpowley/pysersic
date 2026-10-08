@@ -20,16 +20,44 @@ def make_fitter():
     rms = np.full(image.shape, 0.1)
     image = image + np.random.default_rng(42).normal(scale=rms)
 
-    def make(low=0.5, high=6., suffix=''):
-        prior = priors.ScaledSersicExpPrior(suffix=suffix)
+    def make(low=0.5, high=6., suffix='', bulge_radius_floor=None):
+        prior = priors.ScaledSersicExpPrior(suffix=suffix, minimum_bulge_radius=bulge_radius_floor)
         for name, scale in [('xc', 0.1), ('yc', 0.1), ('flux', 5.)]:
             prior.set_gaussian_prior(name, truth[name], scale)
-        for name, bounds in dict(f_1=(0.25, 0.55), n=(1.5, 3.5), ellip_1=(0.05, 0.3),
+        for name, bounds in dict(f_1=(0.25, 0.55), n=(1.5, 3.5), v_1=(0., 1.),
                                  ellip_2=(0.15, 0.45), theta=(0.4, 1.), u_1=(0., 1.)).items():
             prior.set_uniform_prior(name, *bounds)
         prior.set_uniform_prior('r_eff_2', low, high)
         return FitSingle(image, rms, psf, prior, renderer=rendering.MoGFourierRenderer)
     return make
+
+
+def test_independent_bulge_floor(make_fitter):
+    prior = make_fitter(low=10., high=20., bulge_radius_floor=.5).prior
+    prior = priors.update_prior_suffix(prior, '_a')
+    draws = infer.Predictive(prior, num_samples=256)(jax.random.PRNGKey(42))
+    np.testing.assert_allclose(draws['r_eff_1_a'], .5 + draws['u_1_a'] * (draws['r_eff_2_a'] - .5), rtol=1e-6)
+    assert np.min(draws['r_eff_1_a']) < 5.
+    assert np.all(draws['r_eff_1_a'] >= .5)
+    assert np.all(draws['r_eff_1_a'] <= draws['r_eff_2_a'])
+    with pytest.raises(ValueError, match='below minimum_bulge_radius'):
+        prior.set_uniform_prior('r_eff_2', .1, 20.)
+    with pytest.raises(ValueError, match='cannot exceed'):
+        prior.with_minimum_bulge_radius(11.)
+    for floor in (0., -1., np.nan, np.inf):
+        with pytest.raises(ValueError, match='finite and positive'):
+            prior.with_minimum_bulge_radius(floor)
+    reset = prior.with_minimum_bulge_radius(None)
+    assert reset.bulge_radius_floor == 10.
+    assert prior.bulge_radius_floor == .5
+
+
+def test_explicit_floor_gradients(make_fitter):
+    prior = make_fitter(low=10., high=20., bulge_radius_floor=.5).prior
+    def bulge(radius, fraction):
+        return handlers.condition(handlers.seed(prior, 0), {'r_eff_2': radius, 'u_1': fraction})()['r_eff_1']
+    np.testing.assert_allclose(jax.jit(bulge)(12., .4), 5.1)
+    np.testing.assert_allclose(jax.grad(bulge, argnums=(0, 1))(12., .4), (.4, 11.5))
 
 
 @pytest.mark.parametrize('kind', ['uniform', 'truncated', 'custom', 'decreasing', 'shifted_lognormal'])
@@ -148,6 +176,7 @@ def test_multiband_configurations(make_fitter, cls, disc_mode, u_mode):
         for name in priors.base_profile_params['scaled_sersic_exp']:
             params[name] = sites[f'{name}_{band}']['value'] if f'{name}_{band}' in sites else sites[name]['value']
         params['r_eff_1'] = sites[f'r_eff_1_{band}']['value']
+        params['ellip_1'] = sites[f'ellip_1_{band}']['value']
         np.testing.assert_allclose(sites['model']['value'][i], fitter.renderer.render_source(params, 'sersic_exp'), atol=1e-6)
 
 
@@ -226,3 +255,99 @@ def test_multiband_nuts(make_fitter, cls):
         assert np.all(samples[f'r_eff_1_{band}'] >= low)
         assert np.all(samples[f'r_eff_1_{band}'] < samples[f'r_eff_2_{band}'])
     assert np.isfinite(sampler.last_state.potential_energy)
+
+
+@pytest.mark.parametrize('floor', [0., .2])
+@pytest.mark.parametrize('kind', ['uniform', 'truncated', 'custom'])
+def test_ellipticity_ordering(make_fitter, floor, kind):
+    prior = make_fitter().prior
+    if kind == 'uniform':
+        prior.set_uniform_prior('ellip_2', floor, .8)
+    elif kind == 'truncated':
+        prior.set_truncated_gaussian_prior('ellip_2', .4, .1, low=floor, high=.8)
+    else:
+        prior.set_custom_prior('ellip_2', dist.Uniform(floor, .8))
+    assert float(prior.minimum_bulge_ellipticity) == pytest.approx(floor)
+    for seed in (0, 14, 123):
+        draws = infer.Predictive(prior, num_samples=128)(jax.random.PRNGKey(seed))
+        np.testing.assert_allclose(draws['ellip_1'], floor + draws['v_1'] * (draws['ellip_2'] - floor), atol=1e-7)
+        assert np.all(draws['ellip_1'] >= floor)
+        assert np.all(draws['ellip_1'] <= draws['ellip_2'])
+
+
+@pytest.mark.parametrize('disc', [.15, .4])
+@pytest.mark.parametrize('fraction', [0., .5, 1.])
+def test_ellipticity_gradients(make_fitter, disc, fraction):
+    prior = make_fitter().prior
+    def bulge(disc, fraction):
+        return handlers.condition(handlers.seed(prior, 0), {'ellip_2': disc, 'v_1': fraction})()['ellip_1']
+    np.testing.assert_allclose(jax.jit(bulge)(disc, fraction), .15 + fraction * (disc - .15), atol=1e-7)
+    np.testing.assert_allclose(jax.grad(bulge, argnums=(0, 1))(disc, fraction), (fraction, disc - .15), atol=1e-7)
+
+
+@pytest.mark.parametrize('param,low,high', [('ellip_2', -.1, .8), ('ellip_2', 0., 1.), ('v_1', -.1, 1.), ('v_1', 0., 1.1)])
+def test_invalid_ellipticity_support(make_fitter, param, low, high):
+    with pytest.raises(ValueError):
+        make_fitter().prior.set_uniform_prior(param, low, high)
+
+
+def test_independent_ellipticity_rejected(make_fitter):
+    with pytest.raises(ValueError, match='v_1'):
+        make_fitter().prior.set_uniform_prior('ellip_1', 0., .9)
+
+
+@pytest.mark.parametrize('cls', [FitMultiBandPoly, FitMultiBandBSpline])
+@pytest.mark.parametrize('disc_mode', ['linked', 'constant', 'unlinked'])
+@pytest.mark.parametrize('fraction_mode', ['linked', 'constant', 'unlinked'])
+def test_multiband_ellipticity(make_fitter, cls, disc_mode, fraction_mode):
+    roles = {'ellip_2': disc_mode, 'v_1': fraction_mode}
+    linked = [param for param, role in roles.items() if role == 'linked']
+    constant = [param for param, role in roles.items() if role == 'constant']
+    fitter = cls([make_fitter(), make_fitter()], [1., 2.], linked,
+                 const_params=constant, band_names=['a', 'b'], wv_to_save=np.array([1., 1.5, 2.]))
+    draws = infer.Predictive(fitter.build_model(return_model=True), num_samples=8)(jax.random.PRNGKey(19))
+    for band in ('a', 'b'):
+        np.testing.assert_allclose(draws[f'ellip_1_{band}'], .15 + draws[f'v_1_{band}'] * (draws[f'ellip_2_{band}'] - .15), atol=1e-7)
+        assert np.all(draws[f'ellip_1_{band}'] <= draws[f'ellip_2_{band}'])
+
+
+def test_multiband_ellipticity_supports(make_fitter):
+    first, second = make_fitter(), make_fitter()
+    first.prior.set_uniform_prior('ellip_2', .1, .8)
+    second.prior.set_uniform_prior('ellip_2', .2, .7)
+    fitter = FitMultiBandPoly([first, second], [1., 2.], ['ellip_2', 'v_1'],
+                             band_names=['a', 'b'], wv_to_save=np.array([1., 2.]))
+    assert fitter.linked_params_range['ellip_2'] == pytest.approx([.2, .7])
+    draws = infer.Predictive(fitter.build_model(return_model=True), num_samples=4)(jax.random.PRNGKey(5))
+    for band, floor in [('a', .1), ('b', .2)]:
+        np.testing.assert_allclose(draws[f'ellip_1_{band}'], floor + draws[f'v_1_{band}'] * (draws[f'ellip_2_{band}'] - floor), atol=1e-7)
+    with pytest.raises(ValueError, match='Constant ellip_2'):
+        FitMultiBandPoly([make_fitter(), second], [1., 2.], [], const_params=['ellip_2'])
+    with pytest.raises(ValueError, match='Linked ellip_2'):
+        FitMultiBandPoly([first, second], [1., 2.], ['ellip_2'], linked_params_range={'ellip_2': [0., .8]})
+
+
+@pytest.mark.parametrize('cls', [FitMultiBandPoly, FitMultiBandBSpline])
+def test_matching_decimal_ellipticity_ranges(make_fitter, cls):
+    fitters = [make_fitter(), make_fitter()]
+    for fitter in fitters:
+        for param in ('v_1', 'ellip_2'):
+            fitter.prior.set_uniform_prior(param, .2, .8)
+    ranges = {'v_1': [.2, .8], 'ellip_2': [.2, .8]}
+    multiband = cls(fitters, [1., 2.], ['v_1', 'ellip_2'], linked_params_range=ranges)
+    low, high = priors.get_scaled_prior_bounds(multiband.fitter_list[0].prior.dist_dict['v_1' + multiband.fitter_list[0].prior.suffix])
+    np.testing.assert_array_equal(multiband.linked_params_range['v_1'], [low, high])
+    for param in ('v_1', 'ellip_2'):
+        for bounds in ([.199, .8], [.2, .801]):
+            with pytest.raises(ValueError, match=f'Linked {param}'):
+                cls(fitters, [1., 2.], [param],
+                    linked_params_range={param: bounds})
+
+
+@pytest.mark.parametrize('cls', [FitMultiBandPoly, FitMultiBandBSpline])
+def test_beta_fraction_linked_range(make_fitter, cls):
+    fitters = [make_fitter(), make_fitter()]
+    for fitter in fitters:
+        fitter.prior.set_custom_prior('v_1', dist.Beta(2., 2.))
+    multiband = cls(fitters, [1., 2.], ['v_1'], linked_params_range={'v_1': [.2, .8]})
+    np.testing.assert_allclose(multiband.linked_params_range['v_1'], [.2, .8])
