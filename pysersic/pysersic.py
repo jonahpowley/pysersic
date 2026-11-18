@@ -134,16 +134,42 @@ class BaseFitter(ABC):
         """
         self.prior_dict[parameter] = distribution
     
+    # def _check_n_prior_bounds(self):
+    #     for param, prior_dist in self.prior.dist_dict.items():
+    #         if 'n' in param and 'nu' not in param:
+    #             lb,ub = get_numpyro_dist_bounds(prior_dist)
+    #             r_bounds = n_bound_dict[type(self.renderer)]
+    #             # Allow roundoff at the renderer limits.
+    #             below_min = lb < r_bounds[0] and not np.isclose(lb, r_bounds[0], rtol=1e-6, atol=0.)
+    #             above_max = ub > r_bounds[1] and not np.isclose(ub, r_bounds[1], rtol=1e-6, atol=0.)
+    #             if below_min or above_max:
+    #                 raise AssertionError(f"The bounds of the prior for {param} = {lb}-{ub} are outside the bounds allowed for the renderer used: {type(self.renderer)} = {r_bounds}. Please adjust the priors or renderer, see documentation (https://pysersic.readthedocs.io/en/latest/rendering.html) for more details")
+    #         else:
+    #             continue
+
     def _check_n_prior_bounds(self):
         for param, prior_dist in self.prior.dist_dict.items():
-            if 'n' in param and 'nu' not in param:
-                lb,ub = get_numpyro_dist_bounds(prior_dist)
+            if "n" in param and "nu" not in param:
+                lb, ub = get_numpyro_dist_bounds(prior_dist)
                 r_bounds = n_bound_dict[type(self.renderer)]
+
                 # Allow roundoff at the renderer limits.
-                below_min = lb < r_bounds[0] and not np.isclose(lb, r_bounds[0], rtol=1e-6, atol=0.)
-                above_max = ub > r_bounds[1] and not np.isclose(ub, r_bounds[1], rtol=1e-6, atol=0.)
+                below_min = lb < r_bounds[0] and not np.isclose(
+                    lb, r_bounds[0], rtol=1e-6, atol=0.
+                )
+                above_max = ub > r_bounds[1] and not np.isclose(
+                    ub, r_bounds[1], rtol=1e-6, atol=0.
+                )
+
                 if below_min or above_max:
-                    raise AssertionError(f"The bounds of the prior for {param} = {lb}-{ub} are outside the bounds allowed for the renderer used: {type(self.renderer)} = {r_bounds}. Please adjust the priors or renderer, see documentation (https://pysersic.readthedocs.io/en/latest/rendering.html) for more details")
+                    raise AssertionError(
+                        f"The bounds of the prior for {param} = {lb}-{ub} "
+                        f"are outside the bounds allowed for the renderer "
+                        f"used: {type(self.renderer)} = {r_bounds}. "
+                        "Please adjust the priors or renderer, see "
+                        "documentation (https://pysersic.readthedocs.io/en/latest/rendering.html) "
+                        "for more details"
+                    )
             else:
                 continue
     
