@@ -147,7 +147,7 @@ class BaseMultiBandFitter(BaseFitter):
                 if not np.isfinite([low, high]).all() or not lower <= low < high <= upper:
                     raise ValueError("Linked r_eff_2 needs a finite range inside every band's support")
             if 'r_eff_2' in self.const_params and (float(bounds[0][0]) < lower or float(bounds[0][1]) > upper):
-                raise ValueError("Constant disc prior is incompatible with another band's support")
+                raise ValueError("Constant r_eff_2 prior is incompatible with another band's support")
             if 'u_1' in self.linked_params:
                 low, high = self.linked_params_range['u_1']
                 if not 0 <= low < high <= 1:
@@ -302,8 +302,8 @@ class BaseMultiBandFitter(BaseFitter):
                     params_dict[band_name][param_name] = sample(f'{param_name}_{band_name}', band_fitter.prior.dist_dict[f'{param_name}_{band_name}'])
                 
                 if self.scaled_sersic_exp:
-                    params_dict[band_name] = band_fitter.prior.derive_bulge_radius(params_dict[band_name], param_suffix="")
-                    params_dict[band_name] = band_fitter.prior.get_bulge_ellipticity(params_dict[band_name], param_suffix="")
+                    params_dict[band_name] = band_fitter.prior.derive_r_eff_1(params_dict[band_name], param_suffix="")
+                    params_dict[band_name] = band_fitter.prior.get_ellip_1(params_dict[band_name], param_suffix="")
                     for param in ('u_1', 'r_eff_2', 'v_1', 'ellip_2'):
                         if param in self.const_params:
                             deterministic(f'{param}_{band_name}', params_dict[band_name][param])

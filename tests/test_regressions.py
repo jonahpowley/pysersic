@@ -120,7 +120,7 @@ def test_renderer_index_bounds(point_source_fitters, low, high, valid):
 
 
 @pytest.mark.parametrize('profile', ['sersic_exp', 'doublesersic'])
-def test_generated_bulge_index_bounds(point_source_fitters, profile):
+def test_generated_component_1_index_bounds(point_source_fitters, profile):
     fitter = point_source_fitters[0]
     prior = priors.SourceProperties(fitter.data).generate_prior(profile)
     FitSingle(fitter.data, fitter.rms, fitter.psf, prior, renderer=rendering.MoGFourierRenderer)

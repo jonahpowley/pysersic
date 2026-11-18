@@ -614,39 +614,42 @@ def get_scaled_prior_bounds(distribution):
 
 
 class ScaledSersicExpPrior(PySersicSourcePrior):
-    """Sample fractional bulge radius and ellipticity within the disc constraints."""
+    """Sample fractional Sersic radius and ellipticity within the exponential-component constraints.
 
-    minimum_bulge_radius: Optional[float] = None
+    For now, radii and ellipticities are intended to be fixed across bands.
+    """
 
-    def __init__(self, sky_type="none", sky_guess=None, sky_guess_err=None, suffix="", minimum_bulge_radius=None):
+    r_eff_1_minimum: Optional[float] = None
+
+    def __init__(self, sky_type="none", sky_guess=None, sky_guess_err=None, suffix="", r_eff_1_minimum=None):
         super().__init__("scaled_sersic_exp", sky_type, sky_guess, sky_guess_err, suffix)
-        self.minimum_bulge_radius = None
-        if minimum_bulge_radius is not None:
-            if not np.isfinite(minimum_bulge_radius) or minimum_bulge_radius <= 0:
-                raise ValueError('minimum_bulge_radius must be finite and positive')
-            self.minimum_bulge_radius = float(minimum_bulge_radius)
+        self.r_eff_1_minimum = None
+        if r_eff_1_minimum is not None:
+            if not np.isfinite(r_eff_1_minimum) or r_eff_1_minimum <= 0:
+                raise ValueError('r_eff_1_minimum must be finite and positive')
+            self.r_eff_1_minimum = float(r_eff_1_minimum)
 
-    def with_minimum_bulge_radius(self, floor):
-        """Return a prior with a new pixel floor for the bulge radius; None restores the disc-prior floor."""
+    def with_r_eff_1_minimum(self, floor):
+        """Return a prior with a new pixel floor for the Sersic radius; None restores the r_eff_2-prior floor."""
         if floor is not None:
             if not np.isfinite(floor) or floor <= 0:
-                raise ValueError('bulge_radius_floor must be finite and positive')
-            disc_prior = self.dist_dict.get('r_eff_2' + self.suffix)
-            if disc_prior is not None and floor > float(get_scaled_prior_bounds(disc_prior)[0]):
-                raise ValueError('bulge_radius_floor cannot exceed the disc prior lower support')
+                raise ValueError('r_eff_1_minimum must be finite and positive')
+            r_eff_2_prior = self.dist_dict.get('r_eff_2' + self.suffix)
+            if r_eff_2_prior is not None and floor > float(get_scaled_prior_bounds(r_eff_2_prior)[0]):
+                raise ValueError('r_eff_1_minimum cannot exceed the r_eff_2 prior lower support')
         floor = None if floor is None else float(floor)
-        return eqx.tree_at(lambda prior: prior.minimum_bulge_radius, self, floor, is_leaf=lambda value: value is None)
+        return eqx.tree_at(lambda prior: prior.r_eff_1_minimum, self, floor, is_leaf=lambda value: value is None)
 
     @property
-    def bulge_radius_floor(self):
-        """Return the effective bulge floor in pixels."""
-        if self.minimum_bulge_radius is not None:
-            return self.minimum_bulge_radius
+    def r_eff_1_floor(self):
+        """Return the effective Sersic floor in pixels."""
+        if self.r_eff_1_minimum is not None:
+            return self.r_eff_1_minimum
         return get_scaled_prior_bounds(self.dist_dict['r_eff_2' + self.suffix])[0]
 
     @property
-    def minimum_bulge_ellipticity(self):
-        """Return the lower physical support of the disc ellipticity prior."""
+    def ellip_1_minimum(self):
+        """Return the lower physical support of the ellip_2 prior."""
         return get_scaled_prior_bounds(self.dist_dict['ellip_2' + self.suffix])[0]
 
     def _set_dist(self, name, prior):
@@ -663,8 +666,8 @@ class ScaledSersicExpPrior(PySersicSourcePrior):
             low, high = get_scaled_prior_bounds(prior)
             if name.startswith('r_eff_2') and (not np.isfinite(low) or low <= 0 or not high > low):
                 raise ValueError("r_eff_2 needs a finite positive lower support and nonzero width")
-            if name.startswith('r_eff_2') and self.minimum_bulge_radius is not None and low < self.minimum_bulge_radius:
-                raise ValueError('Disc prior lower support cannot be below minimum_bulge_radius')
+            if name.startswith('r_eff_2') and self.r_eff_1_minimum is not None and low < self.r_eff_1_minimum:
+                raise ValueError('r_eff_2 prior lower support cannot be below r_eff_1_minimum')
             if name.startswith('u_1') and not 0 <= low < high <= 1:
                 raise ValueError("u_1 support must lie inside [0, 1]")
         super()._set_dist(name, prior)
@@ -673,17 +676,17 @@ class ScaledSersicExpPrior(PySersicSourcePrior):
         expected = {name + self.suffix for name in base_profile_params[self.profile_type]}
         return set(self.dist_dict) == expected
 
-    def derive_bulge_radius(self, params, param_suffix=None):
-        """Add the physical bulge radius above the effective bulge floor."""
+    def derive_r_eff_1(self, params, param_suffix=None):
+        """Add the physical Sersic radius above the effective Sersic floor."""
         param_suffix = self.suffix if param_suffix is None else param_suffix
-        r_min = self.bulge_radius_floor
-        disc = params['r_eff_2' + param_suffix]
+        r_min = self.r_eff_1_floor
+        r_eff_2 = params['r_eff_2' + param_suffix]
         fraction = params['u_1' + param_suffix]
-        params['r_eff_1' + param_suffix] = deterministic('r_eff_1' + self.suffix, r_min + fraction * (disc - r_min))
+        params['r_eff_1' + param_suffix] = deterministic('r_eff_1' + self.suffix, r_min + fraction * (r_eff_2 - r_min))
         return params
 
-    def get_bulge_ellipticity(self, params, param_suffix=None):
-        """Derive the physical bulge ellipticity from its fractional parameter.
+    def get_ellip_1(self, params, param_suffix=None):
+        """Derive the physical Sersic ellipticity from its fractional parameter.
 
         Parameters
         ----------
@@ -698,16 +701,16 @@ class ScaledSersicExpPrior(PySersicSourcePrior):
             Parameters including deterministic ellip_1.
         """
         param_suffix = self.suffix if param_suffix is None else param_suffix
-        floor = self.minimum_bulge_ellipticity
-        disc = params['ellip_2' + param_suffix]
+        floor = self.ellip_1_minimum
+        ellip_2 = params['ellip_2' + param_suffix]
         fraction = params['v_1' + param_suffix]
-        params['ellip_1' + param_suffix] = deterministic('ellip_1' + self.suffix, floor + fraction * (disc - floor))
+        params['ellip_1' + param_suffix] = deterministic('ellip_1' + self.suffix, floor + fraction * (ellip_2 - floor))
         return params
 
     def __call__(self):
         if not self.check_vars():
             raise ValueError("Incomplete scaled_sersic_exp prior")
-        return self.get_bulge_ellipticity(self.derive_bulge_radius(super().__call__()))
+        return self.get_ellip_1(self.derive_r_eff_1(super().__call__()))
 
 
 class PySersicMultiPrior(BasePrior):
