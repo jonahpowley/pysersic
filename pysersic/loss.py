@@ -141,9 +141,8 @@ def student_t_loss(mod: jnp.array,
     float
         Sampled loss function
     """
-    nu = 5.
     with handlers.mask(mask = mask):
-        loss =  sample(f"Loss{suffix}", dist.StudentT(nu,mod,jnp.sqrt((nu-2.)/2.)*rms), obs=data)    
+        loss =  sample(f"Loss{suffix}", dist.StudentT(nu,mod,jnp.sqrt((nu-2.)/nu)*rms), obs=data)    
     return loss
 
 def student_t_loss_free_sys(mod: jnp.array,
